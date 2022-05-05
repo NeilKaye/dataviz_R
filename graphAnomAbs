@@ -1,0 +1,238 @@
+library(lubridate)
+require(ggplot2)
+require(dplyr)
+require(reshape2)
+require(RColorBrewer)
+require(ggnewscale)
+
+# write a function to create an anomaly and absolute graph from a data frame
+# This requires the following:
+# 1) a data frame with the following columns
+#    date, value, lta, anomaly,
+#    backFill (the column to show which resolution the alternating colors occurs at)
+# 2) a colour scale
+# 3) a breaks to go with the colour scale
+
+
+makeAbsAnomGraph <- function(inDf,colScale,breaks,minVal,maxVal,unitRes,
+                             xBreaks,xLabs,yBreaks,yLabs,title="",backCols) {
+  
+  new_scale <- function(new_aes) {
+    structure(ggplot2::standardise_aes_names(new_aes), class = "new_aes")
+  }
+  
+  mlt1 <- melt(inDf,id="date",c("value","lta"))
+  mlt2 <- melt(inDf,id="date",c("anomaly"))
+  mlt3 <- melt(inDf,id="date",c("backFill"))
+  
+  colnames(mlt1) <- c("date","param","tmean")
+  colnames(mlt2) <- c("date","param","tmeanAnom")
+  colnames(mlt3) <- c("date","param","backFill")
+  ukDailyLong <- merge(mlt1,mlt2,by="date")
+  ukDailyLong <- merge(ukDailyLong,mlt3,by="date")
+  
+  #create a geom_tile where the colour is according to the anomaly and the ones filled in are 
+  # based on the value from the average to the actual value
+  
+  # create dates
+  dates <- ukDailyLong$date
+  
+  valArr <- seq(minVal,maxVal,by=unitRes)
+  
+  tmean <- sort(rep(valArr,length(dates)))
+  date <- rep(dates,length(valArr))
+  newdf <- data.frame(date,tmean)
+  newdata <- newdf[order(date),] 
+  newdata$tmeanAct=-99
+  newdata$anomVal=-99
+  newdata$anomVal2=-99
+  newdata$lowVal=-99
+  newdata$highVal=-99
+  newdata$backFill=-99
+  
+  subDaily <- subset(ukDailyLong,ukDailyLong$param.x=="value")
+  
+  print(head(subDaily))
+  
+  for (row in 1:nrow(subDaily)) {
+    anomVal <- subDaily[row,"tmeanAnom"]
+    backFill <- subDaily[row,"backFill"]
+    tmeanAct <-  subDaily[row,"tmean"]
+    curDate <- subDaily[row,"date"]
+    
+    if(is.na(anomVal)) anomVal=-99
+    if(is.na(tmeanAct)) tmeanAct=-99
+    
+    if(anomVal <=0) {
+      lowVal=tmeanAct
+      highVal=tmeanAct + abs(anomVal)
+    }
+    
+    if(anomVal >=0) {
+      lowVal=tmeanAct - abs(anomVal)
+      highVal=tmeanAct
+    }
+    
+    
+    daySub <- which((newdata$date==curDate) & (newdata$tmean >= lowVal) & (newdata$tmean <= highVal))
+    
+    newdata$anomVal[daySub]=anomVal
+    newdata$lowVal[daySub]=lowVal
+    newdata$highVal[daySub]=highVal
+    newdata$tmeanAct[daySub]=tmeanAct
+    newdata$backFill[daySub]=backFill
+  }
+  
+  newdata$climatology <- newdata$tmeanAct - newdata$anomVal
+  newdata$anomVal2 = newdata$tmean - newdata$climatology
+  
+  
+  newdata2 <- subset(newdata,newdata$anomVal != -99)
+  minAnom <- min(newdata2$anomVal)
+  maxAnom <- max(newdata2$anomVal)
+  
+  # create fake extra data to get the legend working
+  fakedata <- newdata2[1,]
+  fakeDates <- seq(as.Date("2031-01-01"), as.Date("2031-12-01"), by="days")
+  
+  cnt=1
+  for (i in breaks) {
+    inrow <- newdata2[1,]
+    inrow$date=fakeDates[cnt]
+    inrow$anomVal2=i
+    fakedata <- rbind(fakedata,inrow)
+    cnt=cnt+1
+  }
+  
+  climatology <- subset(ukDailyLong,ukDailyLong$param.x=="lta")
+  dailyTempDf <- rbind(newdata2,fakedata)
+
+  minDate <- min(climatology$date)
+  maxDate <- max(climatology$date)
+  dayDate <- format(nextDay,"%d %B %Y")
+  
+  print(head(dailyTempDf))
+  
+  p <- ggplot() + 
+    ylim(c(minVal,maxVal)) +
+    xlim(c(minDate-20,maxDate+20)) +
+    ggtitle(title)
+
+  backColArr <- rep(backCols,100)
+  newdata$backFill=month(newdata$date)
+  
+  # ADD MONTH RECTANGULAR FILLS
+  p <- p + geom_tile(inherit.aes=F,data=newdata , aes(x=date, y=tmean, fill=as.factor(backFill)), size=5,alpha=1) +
+    scale_fill_manual(values = backColArr[1:13]) + new_scale("fill") +
+    geom_tile(inherit.aes=F,data=dailyTempDf , aes(x=date, y=tmean, fill=anomVal2), alpha=1) +
+    scale_fill_gradientn(colours = colScale,breaks=breaks) +
+    geom_line(data=climatology, aes(x=date, y=tmean), colour="#666666") 
+  p <- p +  theme_bw() + theme(axis.text.x=element_blank(),axis.ticks.x=element_blank(),
+                               axis.title.x=element_blank(),axis.title.y=element_blank(),
+                               axis.text.y=element_blank(),axis.ticks.y=element_blank(),
+                               panel.border = element_blank(),plot.margin = margin(0.1, 0.1, 0.1, 0.1, "cm"),
+                               panel.grid.major = element_blank(), panel.grid.minor = element_blank()) +
+    theme(legend.position="none") + theme(plot.title = element_text(size = 22,hjust = 0.5,vjust= -2))
+  
+  txtSize=5
+  
+  p <- p + annotate(geom="text",  x=xBreaks, y=minVal+((maxVal-minVal)*0.98), label=xLabs,color="black",size=txtSize, vjust=1) 
+  p <- p + annotate("segment", x = minDate,y=yBreaks,xend=maxDate,yend=yBreaks, colour = "#444444", size=0.3,linetype=2) 
+  p <- p + annotate(geom="text",  x=maxDate+2, y=yBreaks, label=yLabs,color="black",size=txtSize,  hjust =0) 
+  p <- p + annotate(geom="text",  x=minDate-2, y=yBreaks, label=yLabs,color="black",size=txtSize,  hjust =1) 
+  
+  return(p)
+  
+  
+}
+
+
+returnCETLong <- function(startDate,endDate) {
+  
+  dailyDat <- read.table("https://www.metoffice.gov.uk/hadobs/hadcet/cetdl1772on.dat",header=F)
+  colnames(dailyDat) <- c("year","day",paste0("mn",seq(1,12)))
+  dfCET <- as.data.frame(dailyDat)
+  
+  mydates <- seq(as.Date(startDate), as.Date(endDate),by="day")
+  
+  cetLong <- data.frame(date=mydates)
+  cetLong$cet=0
+  cetLong$year = as.numeric(format(cetLong$date, "%Y"))
+  cetLong$month = format(cetLong$date, "%m")
+  cetLong$day = format(cetLong$date, "%d")
+  
+  # loop through day by day
+  
+  for (i in seq(1,nrow(cetLong))) {
+    
+    yr=cetLong[i,]$year
+    mn=as.numeric(cetLong[i,]$month)
+    day=as.numeric(cetLong[i,]$day)
+    
+    curVal <- dfCET[dfCET$year==yr,][,(mn+2)][day]
+    cetLong[i,]$cet=(curVal/10)
+    
+  }
+  
+  return(cetLong)
+  
+}
+
+
+# get daily LTA 1991 -2020
+cetLTA<- returnCETLong("1991-01-01","2020-12-31")
+cetLTA$doy = yday(cetLTA$date)
+cetLTADayAve <- cetLTA %>% group_by(doy) %>% summarise(rawlta = mean(cet))
+inDays <- c(tail(cetLTADayAve$rawlta,30),cetLTADayAve$rawlta,head(cetLTADayAve$rawlta,30))
+smoothDailyYear <- smooth.spline(seq(1,426),inDays,n=30)$y[31:(31+365)]
+cetLTADayAve$lta = smoothDailyYear
+
+# annual period we are interested in graphing
+startDate = "1996-01-01"
+endDate = "1996-12-31"
+
+# create a long version of the dataset
+cetLong <- returnCETLong(startDate,endDate)
+cetLong$doy = yday(cetLong$date)
+
+# merge the lta average with the year of interest and calculate the anomaly values
+cetLong <- merge(cetLong,cetLTADayAve)
+cetLong$anomaly = cetLong$cet-cetLong$lta
+cetLong$value=cetLong$cet
+cetLong <- cetLong[order(cetLong$date),]
+
+# set up variable needed to make the graph
+
+# make the colour scale needed for showing the anomalies
+breaks <- c(seq(-25,25,by=0.5))
+clBuRd <- rev(brewer.pal(10,"RdBu"))
+centralColors <- colorRampPalette(c("#000044","#000066",clBuRd,"#660000","#440000"))(32)
+colScale <- c(rep("#000044",34),centralColors,rep("#440000",34))
+
+# set the range of values to be shown on the y axis
+minVal=-10
+maxVal=30
+unitRes=0.1
+
+# set up the axis text
+yBreaks = seq(-5,25,by=5)
+yLabs= seq(-5,25,by=5)
+xBreaks <- seq(floor_date(min(cetLong$date), "month"), length=13, by="1 month")[2:13] + 15
+xBreaks <- seq(floor_date(min(cetLong$date), "month"), length=13, by="1 month")[1:12] + 15
+xLabs <- format(xBreaks,"%b %y")
+
+# colour to be used for the monthly divisions
+backCols <- c("#e9e9e9","#ffffff")
+
+
+title= paste0("Daily mean temperature (degrees C)")
+
+# set up the column that colours the background values
+cetLong$backFill=month(cetLong$date)
+
+pTemp <- makeAbsAnomGraph(cetLong,colScale,breaks,minVal,maxVal,unitRes,
+                          xBreaks,xLabs,yBreaks,yLabs,title,backCols) 
+
+pTemp
+
+
